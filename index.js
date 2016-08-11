@@ -16,6 +16,7 @@ function OctoprintAccessory(log, config, api) {
   this.server = config["server"] || 'http://octopi.local';
   this.apiKey = config["api_key"];
 
+  this.currentHeatingCoolingState = Characteristic.CurrentHeatingCoolingState.OFF;
   this.accessories = [];
   this.service = new Service.Thermostat(this.name);
 
@@ -94,6 +95,31 @@ OctoprintAccessory.prototype.getTargetHeatingCoolingState = function(callback) {
 };
 
 OctoprintAccessory.prototype.setTargetHeatingCoolingState = function(value, callback) {
+  if (value === Characteristic.TargetHeatingCoolingState.OFF) {
+    this.log('Off target heating cooling state requested, cancelling job... POST ' + this.server + '/api/job');
+
+    var options = {
+      method: 'GET',
+      uri: this.server + '/api/job',
+      headers: {
+        "X-Api-Key": this.apiKey
+      },
+      body: {
+        "command": "cancel"
+      },
+      json: true
+    };
+
+    rp(options)
+      .then(function() {
+        console.log('Job cancelled');
+        callback(null);
+      })
+      .catch(function(error) {
+        callback(error);
+      });
+  }
+
   callback(null);
 };
 
@@ -144,7 +170,7 @@ OctoprintAccessory.prototype.getTargetTemperature = function(callback) {
 };
 
 OctoprintAccessory.prototype.setTargetTemperature = function(value, callback) {
-  this.log('Setting target temperature... GET ' + this.server + '/api/printer');
+  this.log('Setting target temperature... POST ' + this.server + '/api/printer/tool');
 
   var options = {
     method: 'POST',
