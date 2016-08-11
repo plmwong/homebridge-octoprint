@@ -1,218 +1,189 @@
-var http = require('http');
-var Accessory, Service, Characteristic, UUIDGen;
+var rp = require("request-promise");
+var Service, Characteristic;
 
 module.exports = function(homebridge) {
   console.log("homebridge API version: " + homebridge.version);
 
-  // Accessory must be created from PlatformAccessory Constructor
-  Accessory = homebridge.platformAccessory;
-
-  // Service and Characteristic are from hap-nodejs
   Service = homebridge.hap.Service;
   Characteristic = homebridge.hap.Characteristic;
-  UUIDGen = homebridge.hap.uuid;
 
-  // For platform plugin to be considered as dynamic platform plugin,
-  // registerPlatform(pluginName, platformName, constructor, dynamic), dynamic must be true
-  homebridge.registerPlatform("homebridge-octoprint", "Octoprint", Octoprint, true);
-}
+  homebridge.registerAccessory("homebridge-octoprint", "Octoprint", OctoprintAccessory);
+};
 
-// Platform constructor
-// config may be null
-// api may be null if launched from old homebridge version
-function Octoprint(log, config, api) {
-  log("Octoprint Init");
-  var platform = this;
+function OctoprintAccessory(log, config, api) {
   this.log = log;
-  this.config = config;
+  this.name = config["name"];
+  this.server = config["server"] || 'http://octopi.local';
+  this.apiKey = config["api_key"];
+
   this.accessories = [];
+  this.service = new Service.Thermostat(this.name);
 
-  this.requestServer = http.createServer(function(request, response) {
-    if (request.url === "/add") {
-      this.addAccessory(new Date().toISOString());
-      response.writeHead(204);
-      response.end();
-    }
+  //Required
+  this.service
+    .getCharacteristic(Characteristic.CurrentHeatingCoolingState)
+    .on('get', this.getCurrentHeatingCoolingState.bind(this))
+    .on('set', this.setCurrentHeatingCoolingState.bind(this));
 
-    if (request.url == "/reachability") {
-      this.updateAccessoriesReachability();
-      response.writeHead(204);
-      response.end();
-    }
+	this.service
+		.getCharacteristic(Characteristic.TargetHeatingCoolingState)
+		.on('get', this.getTargetHeatingCoolingState.bind(this))
+		.on('set', this.setTargetHeatingCoolingState.bind(this));
 
-    if (request.url == "/remove") {
-      this.removeAccessory();
-      response.writeHead(204);
-      response.end();
-    }
-  }.bind(this));
+  this.service
+    .getCharacteristic(Characteristic.CurrentTemperature)
+    .on('get', this.getCurrentTemperature.bind(this));
 
-  this.requestServer.listen(18081, function() {
-    platform.log("Server Listening...");
-  });
+	this.service
+		.getCharacteristic(Characteristic.TargetTemperature)
+		.on('get', this.getTargetTemperature.bind(this))
+		.on('set', this.setTargetTemperature.bind(this));
 
-  if (api) {
-      // Save the API object as plugin needs to register new accessory via this object.
-      this.api = api;
+  this.service
+		.getCharacteristic(Characteristic.TemperatureDisplayUnits)
+		.on('get', this.getTemperatureDisplayUnits.bind(this))
+		.on('set', this.setTemperatureDisplayUnits.bind(this));
 
-      // Listen to event "didFinishLaunching", this means homebridge already finished loading cached accessories
-      // Platform Plugin should only register new accessory that doesn't exist in homebridge after this event.
-      // Or start discover new accessories
-      this.api.on('didFinishLaunching', function() {
-        platform.log("DidFinishLaunching");
-      }.bind(this));
-  }
+  //Optional
+	this.service
+		.getCharacteristic(Characteristic.Name)
+		.on('get', this.getName.bind(this));
 }
 
-// Function invoked when homebridge tries to restore cached accessory
-// Developer can configure accessory at here (like setup event handler)
-// Update current value
-Octoprint.prototype.configureAccessory = function(accessory) {
-  this.log(accessory.displayName, "Configure Accessory");
-  var platform = this;
+OctoprintAccessory.prototype.identify = function(callback) {
+  this.log('Identify requested');
+  callback(null);
+};
 
-  // set the accessory to reachable if plugin can currently process the accessory
-  // otherwise set to false and update the reachability later by invoking
-  // accessory.updateReachability()
-  accessory.reachable = true;
+//Required
+OctoprintAccessory.prototype.getCurrentHeatingCoolingState = function(callback) {
+  this.log('Getting current heating cooling state... GET ' + this.server + '/api/printer');
 
-  accessory.on('identify', function(paired, callback) {
-    platform.log(accessory.displayName, "Identify!!!");
-    callback();
-  });
+  var options = {
+    method: 'GET',
+    uri: this.server + '/api/printer',
+    headers: {
+      "X-Api-Key": this.apiKey
+    },
+    json: true
+  };
 
-  if (accessory.getService(Service.Lightbulb)) {
-    accessory.getService(Service.Lightbulb)
-    .getCharacteristic(Characteristic.On)
-    .on('set', function(value, callback) {
-      platform.log(accessory.displayName, "Light -> " + value);
-      callback();
+  rp(options)
+    .then(function(printerState) {
+      console.log('Retrieved printer state: ' + JSON.stringify(printerState));
+      var currentTemperature = printerState.temps.tool0.actual;
+      var targetTemperature = printerState.temps.tool0.target;
+
+      if (targetTemperature > currentTemperature) {
+        callback(null, Characteristic.CurrentHeatingCoolingState.HEAT);
+      } else {
+        callback(null, Characteristic.CurrentHeatingCoolingState.COOL);
+      }
+    })
+    .catch(function(error) {
+      callback(error);
     });
-  }
+};
 
-  this.accessories.push(accessory);
-}
+OctoprintAccessory.prototype.setCurrentHeatingCoolingState = function(value, callback) {
+  callback(null);
+};
 
-//Handler will be invoked when user try to config your plugin
-//Callback can be cached and invoke when nessary
-Octoprint.prototype.configurationRequestHandler = function(context, request, callback) {
-  this.log("Context: ", JSON.stringify(context));
-  this.log("Request: ", JSON.stringify(request));
+OctoprintAccessory.prototype.getTargetHeatingCoolingState = function(callback) {
+  callback(null, Characteristic.TargetHeatingCoolingState.AUTO);
+};
 
-  // Check the request response
-  if (request && request.response && request.response.inputs && request.response.inputs.name) {
-    this.addAccessory(request.response.inputs.name);
+OctoprintAccessory.prototype.setTargetHeatingCoolingState = function(value, callback) {
+  callback(null);
+};
 
-    // Invoke callback with config will let homebridge save the new config into config.json
-    // Callback = function(response, type, replace, config)
-    // set "type" to platform if the plugin is trying to modify platforms section
-    // set "replace" to true will let homebridge replace existing config in config.json
-    // "config" is the data platform trying to save
-    callback(null, "platform", true, {"platform":"Octoprint", "otherConfig":"SomeData"});
-    return;
-  }
+OctoprintAccessory.prototype.getCurrentTemperature = function(callback) {
+  this.log('Getting current temperature... GET ' + this.server + '/api/printer');
 
-  // - UI Type: Input
-  // Can be used to request input from user
-  // User response can be retrieved from request.response.inputs next time
-  // when configurationRequestHandler being invoked
+  var options = {
+    method: 'GET',
+    uri: this.server + '/api/printer',
+    headers: {
+      "X-Api-Key": this.apiKey
+    },
+    json: true
+  };
 
-  var respDict = {
-    "type": "Interface",
-    "interface": "input",
-    "title": "Add Accessory",
-    "items": [
-      {
-        "id": "name",
-        "title": "Name",
-        "placeholder": "Fancy Light"
-      }//,
-      // {
-      //   "id": "pw",
-      //   "title": "Password",
-      //   "secure": true
-      // }
-    ]
-  }
+  rp(options)
+    .then(function(printerState) {
+      console.log('Retrieved current printer state: ' + JSON.stringify(printerState));
+      var currentTemperature = printerState.temps.tool0.actual;
+      callback(null, currentTemperature);
+    })
+    .catch(function(error) {
+      callback(error);
+    });
+};
 
-  // - UI Type: List
-  // Can be used to ask user to select something from the list
-  // User response can be retrieved from request.response.selections next time
-  // when configurationRequestHandler being invoked
+OctoprintAccessory.prototype.getTargetTemperature = function(callback) {
+  this.log('Getting target temperature... GET ' + this.server + '/api/printer');
 
-  // var respDict = {
-  //   "type": "Interface",
-  //   "interface": "list",
-  //   "title": "Select Something",
-  //   "allowMultipleSelection": true,
-  //   "items": [
-  //     "A","B","C"
-  //   ]
-  // }
+  var options = {
+    method: 'GET',
+    uri: this.server + '/api/printer',
+    headers: {
+      "X-Api-Key": this.apiKey
+    },
+    json: true
+  };
 
-  // - UI Type: Instruction
-  // Can be used to ask user to do something (other than text input)
-  // Hero image is base64 encoded image data. Not really sure the maximum length HomeKit allows.
+  rp(options)
+    .then(function(printerState) {
+      console.log('Retrieved target printer state: ' + JSON.stringify(printerState));
+      var targetTemperature = printerState.temps.tool0.target;
+      callback(null, targetTemperature);
+    })
+    .catch(function(error) {
+      callback(error);
+    });
+};
 
-  // var respDict = {
-  //   "type": "Interface",
-  //   "interface": "instruction",
-  //   "title": "Almost There",
-  //   "detail": "Please press the button on the bridge to finish the setup.",
-  //   "heroImage": "base64 image data",
-  //   "showActivityIndicator": true,
-  // "showNextButton": true,
-  // "buttonText": "Login in browser",
-  // "actionURL": "https://google.com"
-  // }
+OctoprintAccessory.prototype.setTargetTemperature = function(value, callback) {
+  this.log('Setting target temperature... GET ' + this.server + '/api/printer');
 
-  // Plugin can set context to allow it track setup process
-  context.ts = "Hello";
+  var options = {
+    method: 'POST',
+    uri: this.server + '/api/printer/tool',
+    headers: {
+      "X-Api-Key": this.apiKey
+    },
+    body: {
+      "command": "target",
+      "targets": {
+        "tool0": value
+      }
+    },
+    json: true
+  };
 
-  //invoke callback to update setup UI
-  callback(respDict);
-}
+  rp(options)
+    .then(function() {
+      console.log('Successfully set target temperature to ' + value);
+      callback(null);
+    })
+    .catch(function(error) {
+      callback(error);
+    });
+};
 
-// Sample function to show how developer can add accessory dynamically from outside event
-Octoprint.prototype.addAccessory = function(accessoryName) {
-  this.log("Add Accessory");
-  var platform = this;
-  var uuid;
+OctoprintAccessory.prototype.getTemperatureDisplayUnits = function(callback) {
+  callback(null, Characteristic.TemperatureDisplayUnits.CELSIUS);
+};
 
-  uuid = UUIDGen.generate(accessoryName);
+OctoprintAccessory.prototype.setTemperatureDisplayUnits = function(value, callback) {
+  callback(null);
+};
 
-  var newAccessory = new Accessory(accessoryName, uuid);
-  newAccessory.on('identify', function(paired, callback) {
-    platform.log(accessory.displayName, "Identify!!!");
-    callback();
-  });
-  // Plugin can save context on accessory
-  // To help restore accessory in configureAccessory()
-  // newAccessory.context.something = "Something"
+//Optional
+OctoprintAccessory.prototype.getName = function(callback) {
+  callback(null, this.name);
+};
 
-  newAccessory.addService(Service.Lightbulb, "Test Light")
-  .getCharacteristic(Characteristic.On)
-  .on('set', function(value, callback) {
-    platform.log(accessory.displayName, "Light -> " + value);
-    callback();
-  });
-
-  this.accessories.push(newAccessory);
-  this.api.registerPlatformAccessories("homebridge-octoprint", "Octoprint", [newAccessory]);
-}
-
-Octoprint.prototype.updateAccessoriesReachability = function() {
-  this.log("Update Reachability");
-  for (var index in this.accessories) {
-    var accessory = this.accessories[index];
-    accessory.updateReachability(false);
-  }
-}
-
-// Sample function to show how developer can remove accessory dynamically from outside event
-Octoprint.prototype.removeAccessory = function() {
-  this.log("Remove Accessory");
-  this.api.unregisterPlatformAccessories("homebridge-octoprint", "Octoprint", this.accessories);
-
-  this.accessories = [];
-}
+OctoprintAccessory.prototype.getServices = function() {
+  return [this.service];
+};
